@@ -7,6 +7,8 @@ from typing import Sequence
 
 import torch
 
+import tilelang_turboquant.kernels as tq_kernels
+
 from tilelang_turboquant.backend.metadata import TileLangTQMetadata
 from tilelang_turboquant.config import SlotLayout, TileLangTQConfig, get_variant_by_dtype_str
 from tilelang_turboquant.quantization.compat import normalize_cache_dtype
@@ -125,6 +127,87 @@ class TileLangTQAttentionImpl(AttentionImpl[TileLangTQMetadata]):
         missing = [name for name in required if not hasattr(layer, name)]
         if missing:
             raise ValueError(f"Layer is missing required TQ runtime buffers: {missing}")
+
+    def _runtime_kernel_buffers(self, layer) -> dict[str, torch.Tensor | None]:
+        self._validate_runtime_buffers(layer)
+        return {
+            "rotation": layer._tq_rotation,
+            "rotation_t": getattr(layer, "_tq_rotation_t", layer._tq_rotation),
+            "key_midpoints": layer._tq_key_midpoints,
+            "key_centroids": layer._tq_key_centroids,
+            "value_midpoints": layer._tq_value_midpoints,
+            "value_centroids": layer._tq_value_centroids,
+            "S_matrix": layer._tq_S_matrix,
+            "mid_o_buf": getattr(layer, "_tq_mid_o_buf", None),
+            "lse_buf": getattr(layer, "_tq_lse_buf", None),
+            "output_buf": getattr(layer, "_tq_output_buf", None),
+        }
+
+    def _maybe_store_with_kernel(
+        self,
+        layer,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> bool:
+        if not tq_kernels.is_store_kernel_available():
+            return False
+
+        buffers = self._runtime_kernel_buffers(layer)
+        tq_kernels.tl_turboquant_store(
+            key=key,
+            value=value,
+            kv_cache=kv_cache,
+            slot_mapping=slot_mapping,
+            rotation=buffers["rotation"],
+            rotation_t=buffers["rotation_t"],
+            key_midpoints=buffers["key_midpoints"],
+            key_centroids=buffers["key_centroids"],
+            value_midpoints=buffers["value_midpoints"],
+            value_centroids=buffers["value_centroids"],
+            S_matrix=buffers["S_matrix"],
+            cfg=self.tq_config,
+        )
+        return True
+
+    def _maybe_decode_with_kernel(
+        self,
+        layer,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        block_table_row: torch.Tensor,
+        seq_len: int,
+    ) -> torch.Tensor | None:
+        if not tq_kernels.is_decode_kernel_available():
+            return None
+
+        buffers = self._runtime_kernel_buffers(layer)
+        if (
+            buffers["mid_o_buf"] is None
+            or buffers["lse_buf"] is None
+            or buffers["output_buf"] is None
+        ):
+            raise ValueError("Layer is missing required decode scratch buffers")
+
+        seq_lens = torch.tensor([seq_len], dtype=block_table_row.dtype, device=block_table_row.device)
+        return tq_kernels.tl_turboquant_decode_attention(
+            query=query,
+            kv_cache=kv_cache,
+            block_table=block_table_row.unsqueeze(0),
+            seq_lens=seq_lens,
+            rotation=buffers["rotation"],
+            rotation_t=buffers["rotation_t"],
+            key_centroids=buffers["key_centroids"],
+            value_centroids=buffers["value_centroids"],
+            S_matrix=buffers["S_matrix"],
+            scale=self.scale,
+            cfg=self.tq_config,
+            mid_o_buf=buffers["mid_o_buf"],
+            lse_buf=buffers["lse_buf"],
+            output_buf=buffers["output_buf"],
+            max_num_kv_splits=self.max_num_kv_splits,
+        )
 
     def _encode_component(
         self,
@@ -341,13 +424,24 @@ class TileLangTQAttentionImpl(AttentionImpl[TileLangTQMetadata]):
         cursor = 0
         for req_idx, q_len in enumerate(q_lens):
             seq_len = int(attn_metadata.seq_lens[req_idx].item())
+            q_slice = query[cursor : cursor + q_len]
+            kernel_out = self._maybe_decode_with_kernel(
+                layer,
+                q_slice,
+                kv_cache,
+                attn_metadata.block_table[req_idx],
+                seq_len,
+            )
+            if kernel_out is not None:
+                outputs[cursor : cursor + q_len] = kernel_out.to(dtype=outputs.dtype)
+                cursor += q_len
+                continue
             keys, values = self._load_cached_prefix(
                 layer,
                 kv_cache,
                 attn_metadata.block_table[req_idx],
                 seq_len,
             )
-            q_slice = query[cursor : cursor + q_len]
             outputs[cursor : cursor + q_len] = self._causal_attention(
                 q_slice,
                 keys,
@@ -382,6 +476,17 @@ class TileLangTQAttentionImpl(AttentionImpl[TileLangTQMetadata]):
                     0,
                 )
             elif q_len <= self._continuation_decode_threshold:
+                kernel_out = self._maybe_decode_with_kernel(
+                    layer,
+                    q_slice,
+                    kv_cache,
+                    attn_metadata.block_table[req_idx],
+                    seq_len,
+                )
+                if kernel_out is not None:
+                    outputs[cursor : cursor + q_len] = kernel_out.to(dtype=outputs.dtype)
+                    cursor += q_len
+                    continue
                 keys, values = self._load_cached_prefix(
                     layer,
                     kv_cache,
@@ -516,6 +621,8 @@ class TileLangTQAttentionImpl(AttentionImpl[TileLangTQMetadata]):
             return
         if key.shape[0] < N or value.shape[0] < N:
             raise ValueError("Key/value rows must cover slot_mapping.shape[0]")
+        if self._maybe_store_with_kernel(layer, key, value, kv_cache, slot_mapping):
+            return
         block_size = kv_cache.shape[1]
         for row_idx in range(N):
             slot_index = int(slot_mapping[row_idx].item())

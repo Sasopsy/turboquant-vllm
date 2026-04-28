@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Standalone TileLang TurboQuant plugin components for vLLM."
 requires-python = ">=3.11"
 
+[project.entry-points."vllm.general_plugins"]
+tilelang_turboquant = "tilelang_turboquant.plugin:register_all"
+
 [tool.setuptools.packages.find]
 include = ["tilelang_turboquant*"]
-
