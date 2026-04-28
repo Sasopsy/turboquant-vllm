@@ -1,0 +1,3 @@
+# Local session / agent run logs (omit from public repo)
+SESSION_LOGS/
+__pycache__/

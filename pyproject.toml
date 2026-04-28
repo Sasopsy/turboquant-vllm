@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tilelang-turboquant"
+version = "0.1.0"
+description = "Standalone TileLang TurboQuant plugin components for vLLM."
+requires-python = ">=3.11"
+
+[tool.setuptools.packages.find]
+include = ["tilelang_turboquant*"]
+
