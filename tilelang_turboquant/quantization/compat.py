@@ -26,10 +26,12 @@ VARIANT_BY_CACHE_DTYPE = {
 _CACHE_CONFIG_INIT_PATCHED = False
 _ATTN_BACKEND_PATCHED = False
 _KV_SPEC_PATCHED = False
+_CUSTOM_BACKEND_NAME_PATCHED = False
 _ORIG_CACHE_CONFIG_INIT: Callable[..., Any] | None = None
 _ORIG_SELECTOR_GET_ATTN_BACKEND: Callable[..., Any] | None = None
 _ORIG_ATTN_GET_ATTN_BACKEND: Callable[..., Any] | None = None
 _ORIG_ATTENTION_GET_KV_CACHE_SPEC: Callable[..., Any] | None = None
+_ORIG_ATTENTION_INIT: Callable[..., Any] | None = None
 
 
 def normalize_cache_dtype(cache_dtype: str) -> str:
@@ -164,3 +166,56 @@ def install_kv_spec_dispatch_shim() -> None:
 
     Attention.get_kv_cache_spec = _patched_get_kv_cache_spec
     _KV_SPEC_PATCHED = True
+
+
+def install_custom_backend_name_shim() -> None:
+    """Let the plugin backend keep its canonical name on branches that expect an enum key.
+
+    The current vLLM Attention layer records `AttentionBackendEnum[get_name()]`
+    during initialization. Our backend is registered under `CUSTOM`, but its
+    plugin-owned diagnostic name remains `TILELANG_TQ`. This shim temporarily
+    aliases that name to `CUSTOM` during `Attention.__init__` only.
+    """
+
+    global _CUSTOM_BACKEND_NAME_PATCHED
+    global _ORIG_ATTENTION_INIT
+
+    from vllm.config import get_current_vllm_config
+    from vllm.model_executor.layers.attention.attention import Attention
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    if _CUSTOM_BACKEND_NAME_PATCHED:
+        return
+
+    _ORIG_ATTENTION_INIT = Attention.__init__
+
+    def _patched_attention_init(self, *args, **kwargs):
+        from tilelang_turboquant.backend.backend import TileLangTQAttentionBackend
+
+        should_alias = False
+        target_backend = kwargs.get("attn_backend")
+        if target_backend is TileLangTQAttentionBackend:
+            should_alias = True
+        elif target_backend is None:
+            try:
+                should_alias = (
+                    get_current_vllm_config().attention_config.backend
+                    == AttentionBackendEnum.CUSTOM
+                )
+            except Exception:
+                should_alias = False
+
+        if not should_alias:
+            assert _ORIG_ATTENTION_INIT is not None
+            return _ORIG_ATTENTION_INIT(self, *args, **kwargs)
+
+        original_get_name = TileLangTQAttentionBackend.get_name
+        TileLangTQAttentionBackend.get_name = staticmethod(lambda: "CUSTOM")
+        try:
+            assert _ORIG_ATTENTION_INIT is not None
+            return _ORIG_ATTENTION_INIT(self, *args, **kwargs)
+        finally:
+            TileLangTQAttentionBackend.get_name = original_get_name
+
+    Attention.__init__ = _patched_attention_init
+    _CUSTOM_BACKEND_NAME_PATCHED = True

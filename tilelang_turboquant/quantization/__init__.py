@@ -4,6 +4,7 @@ from tilelang_turboquant.quantization.compat import (
     CACHE_DTYPE_ALIASES,
     VARIANT_BY_CACHE_DTYPE,
     install_cache_dtype_admission_shims,
+    install_custom_backend_name_shim,
     install_kv_spec_dispatch_shim,
     normalize_cache_dtype,
 )
@@ -22,7 +23,7 @@ __all__ = [
     "TileLangTQKVCacheMethod",
     "TileLangTQQuantizationConfig",
     "install_cache_dtype_admission_shims",
+    "install_custom_backend_name_shim",
     "install_kv_spec_dispatch_shim",
     "normalize_cache_dtype",
 ]
-

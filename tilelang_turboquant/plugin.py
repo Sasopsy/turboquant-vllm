@@ -2,10 +2,25 @@
 
 from tilelang_turboquant.quantization.compat import (
     install_cache_dtype_admission_shims,
+    install_custom_backend_name_shim,
     install_kv_spec_dispatch_shim,
 )
 
 _REGISTERED = False
+
+
+def _register_attention_backend() -> None:
+    """Bind the plugin backend to vLLM's CUSTOM attention-backend slot."""
+
+    from vllm.v1.attention.backends.registry import (
+        AttentionBackendEnum,
+        register_backend,
+    )
+
+    register_backend(
+        AttentionBackendEnum.CUSTOM,
+        "tilelang_turboquant.backend.backend.TileLangTQAttentionBackend",
+    )
 
 
 def register_all() -> None:
@@ -32,4 +47,6 @@ def register_all() -> None:
     # reject plugin-owned cache dtype literals or skip our plugin KV spec.
     install_cache_dtype_admission_shims()
     install_kv_spec_dispatch_shim()
+    install_custom_backend_name_shim()
+    _register_attention_backend()
     _REGISTERED = True

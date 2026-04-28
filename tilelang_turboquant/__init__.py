@@ -1,5 +1,11 @@
 """TileLang TurboQuant standalone plugin package."""
 
+from tilelang_turboquant.backend import (
+    TileLangTQAttentionBackend,
+    TileLangTQAttentionImpl,
+    TileLangTQMetadata,
+    TileLangTQMetadataBuilder,
+)
 from tilelang_turboquant.config import (
     SlotLayout,
     TileLangTQConfig,
@@ -42,6 +48,10 @@ __all__ = [
     "QJLSpec",
     "RotationSpec",
     "CACHE_DTYPE_ALIASES",
+    "TileLangTQAttentionBackend",
+    "TileLangTQAttentionImpl",
+    "TileLangTQMetadata",
+    "TileLangTQMetadataBuilder",
     "get_codebook",
     "get_packed_kv_cache_shape",
     "get_rotation",
